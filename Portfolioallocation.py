@@ -1,5 +1,4 @@
 #Importing all required libraries
-#Created by Sanket Karve
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
