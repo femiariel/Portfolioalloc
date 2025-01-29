@@ -1,83 +1,97 @@
-#Importing all required libraries
-import matplotlib.pyplot as plt
-import numpy as np
+import requests
 import pandas as pd
-import pandas_datareader as web
-from pandas_datareader import DataReader
-from matplotlib.ticker import FuncFormatter
-from pypfopt.efficient_frontier import EfficientFrontier
-from pypfopt import risk_models, objective_functions
-from pypfopt import discrete_allocation
-from pypfopt import expected_returns
-from pypfopt.cla import CLA
-from pypfopt import plotting
-from matplotlib.ticker import FuncFormatter
-
+import matplotlib.pyplot as plt
 import gradio as gr
-import pandas as pd
-import numpy as np
-from pypfopt import EfficientFrontier, objective_functions, expected_returns, risk_models, discrete_allocation
-from pandas_datareader import data as web
-import matplotlib.pyplot as plt
+from pypfopt import EfficientFrontier, expected_returns, risk_models, discrete_allocation
 
+# API Key pour Financial Modeling Prep
+FMP_API_KEY = "3gYsTdxP48Q6aci1mDcgchFXGrhd7CQo"
 
-def optimize_portfolio_gradio(tickers_input):
-    tickers = [ticker.strip() for ticker in tickers_input.split(",")]
+# Fonction pour récupérer les prix ajustés d'un actif
+def get_adj_close_price(symbol, start_date="2023-01-01"):
+    hist_price_url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}?from={start_date}&apikey={FMP_API_KEY}"
+    r_json = requests.get(hist_price_url).json()
+    if "historical" not in r_json:
+        return None
+    df = pd.DataFrame(r_json["historical"]).set_index("date").sort_index()
+    df.index = pd.to_datetime(df.index)
+    return df[["adjClose"]].rename(columns={"adjClose": symbol})
 
-    # Charger les données des prix
-    price_data = []
-    for ticker in tickers:
-        prices = web.DataReader(ticker, start='2015-01-01', end='2020-06-06', data_source='stooq')
-        price_data.append(prices[['Close']])
+# Fonction pour récupérer les bornes avant que l'utilisateur choisisse
+def get_bounds(tickers_input):
+    tickers = [ticker.strip().upper() for ticker in tickers_input.split(",")]
     
-    df_stocks = pd.concat(price_data, axis=1)
-    df_stocks.columns = tickers
-    df_stocks.dropna(inplace=True)
+    # Récupération des prix
+    price_df_list = []
+    for ticker in tickers:
+        df = get_adj_close_price(ticker)
+        if df is not None:
+            price_df_list.append(df)
 
-    # Calcul des rendements et de la covariance
-    mu = expected_returns.mean_historical_return(df_stocks)
-    Sigma = risk_models.sample_cov(df_stocks)
+    if not price_df_list:
+        return "⚠️ Aucune donnée disponible.", None, None, None, None
 
-    # Vérification des rendements
-    print("Rendements attendus :")
-    print(mu)
+    prices_df = pd.concat(price_df_list, axis=1).dropna()
+    
+    # Calcul des rendements attendus et de la matrice de covariance
+    avg_returns = expected_returns.mean_historical_return(prices_df, compounding=False)
+    cov_mat = risk_models.sample_cov(prices_df)
 
-    # Si tous les rendements sont trop faibles, ajuster le taux sans risque
-    try:
-        ef = EfficientFrontier(mu, Sigma, weight_bounds=(0, 1), solver="ECOS")
-        ef.max_sharpe(risk_free_rate=0.01)  # Ajuste à un taux sans risque de 1 %
-    except ValueError as e:
-        print("Erreur rencontrée :", e)
-        print("Essai avec une autre méthode (minimisation de la volatilité)...")
-        ef.min_volatility()  # Utilise une méthode alternative
-    optimal_weights = ef.clean_weights()
-    optimal_performance = ef.portfolio_performance(verbose=True)
+    # Instancier l'optimisation
+    ef = EfficientFrontier(avg_returns, cov_mat)
 
-    # Calcul des allocations discrètes et du graphe
-    latest_prices = discrete_allocation.get_latest_prices(df_stocks)
-    allocation_minv, rem_minv = discrete_allocation.DiscreteAllocation(
+    # Récupérer le rendement et risque minimum
+    ef.min_volatility()
+    ret_min, vol_min, _ = ef.portfolio_performance(verbose=False)
+
+    # Récupérer le rendement et risque maximum
+    ef = EfficientFrontier(avg_returns, cov_mat)
+    ef.max_sharpe()
+    ret_max, vol_max, _ = ef.portfolio_performance(verbose=False)
+
+    return f"📊 Rendements possibles : {ret_min:.2%} → {ret_max:.2%}\n⚖️ Risques possibles : {vol_min:.2%} → {vol_max:.2%}", float(ret_min), float(ret_max), float(vol_min), float(vol_max)
+
+# Fonction principale d'optimisation
+def optimize_portfolio(tickers_input, method, target_value):
+    tickers = [ticker.strip().upper() for ticker in tickers_input.split(",")]
+
+    # Récupérer les prix
+    price_df_list = []
+    for ticker in tickers:
+        df = get_adj_close_price(ticker)
+        if df is not None:
+            price_df_list.append(df)
+
+    if not price_df_list:
+        return "⚠️ Aucune donnée disponible.", None
+
+    prices_df = pd.concat(price_df_list, axis=1).dropna()
+
+    # Calcul des rendements et covariance
+    avg_returns = expected_returns.mean_historical_return(prices_df, compounding=False)
+    cov_mat = risk_models.sample_cov(prices_df)
+
+    ef = EfficientFrontier(avg_returns, cov_mat)
+    optimal_weights = ef.efficient_risk(target_value) if method == "Maximiser le gain pour un risque donné" else ef.efficient_return(target_value)
+    
+    expected_ret, volatility, sharpe_ratio = ef.portfolio_performance(verbose=True, risk_free_rate=0)
+
+    latest_prices = discrete_allocation.get_latest_prices(prices_df)
+
+    allocation, rem_cash = discrete_allocation.DiscreteAllocation(
         optimal_weights, latest_prices, total_portfolio_value=10000
-    ).lp_portfolio()
+    ).greedy_portfolio()
 
-    # Calcul des valeurs
-    allocated_value = sum(latest_prices[ticker] * shares for ticker, shares in allocation_minv.items())
-    expected_return = sum(optimal_weights[ticker] * mu[ticker] for ticker in allocation_minv.keys())
-    total_gains = allocated_value * expected_return  # Gains potentiels uniquement
-    potential_value = allocated_value + total_gains  # Montant total attendu
+    allocated_value = sum(latest_prices[ticker] * shares for ticker, shares in allocation.items())
+    total_gains = allocated_value * expected_ret
+    potential_value = allocated_value + total_gains
 
-    # Afficher les résultats explicites
-    print(f"Montant alloué : ${allocated_value:,.2f}")
-    print(f"Rendement attendu (taux) : {expected_return * 100:.2f}%")
-    print(f"Gains potentiels : ${total_gains:,.2f}")
-    print(f"Montant total attendu (Potential Value) : ${potential_value:,.2f}")
-
-    # Création du graphique
+    # Générer le graphique
     fig, ax = plt.subplots(figsize=(8, 6))
-    labels = ['Allocated ($10,000)', 'Potential (Expected Return)']
+    labels = ["Allocated ($10,000)", "Potential (Expected Return)"]
     values = [allocated_value, potential_value]
     bars = ax.bar(labels, values, color=['#1f77b4', '#2ca02c'], alpha=0.85, edgecolor='black', linewidth=1.2)
 
-    # Titre et labels
     ax.set_title('Portfolio Allocation vs Expected Return', fontsize=14, fontweight='bold')
     ax.set_ylabel('Portfolio Value ($)')
     for bar, value in zip(bars, values):
@@ -85,27 +99,36 @@ def optimize_portfolio_gradio(tickers_input):
 
     plt.tight_layout()
     plt.savefig("temp_fig.png")
-    plt.close()
 
-    return allocation_minv, "temp_fig.png"
+    results = f"""
+    ✅ **Optimisation Complète**  
+    📈 **Rendement Attendu** : {expected_ret * 100:.2f} %  
+    📊 **Volatilité (Risque)** : {volatility * 100:.2f} %  
+    ⚖️ **Ratio de Sharpe** : {sharpe_ratio:.2f}  
+    💰 **Montant Alloué** : ${allocated_value:,.2f}  
+    🚀 **Gains Potentiels** : ${total_gains:,.2f}  
+    📈 **Valeur Totale du Portefeuille** : ${potential_value:,.2f}  
+    """
 
-
-
-
+    return results, "temp_fig.png"
 
 # Interface Gradio
 with gr.Blocks() as demo:
-    gr.Markdown("### Optimisation de Portefeuille")
     tickers_input = gr.Textbox(label="Tickers (séparés par des virgules)", placeholder="Ex: AAPL, MSFT, GOOG")
-    output_allocation = gr.Textbox(label="Allocation optimale")
-    output_graph = gr.Image(label="Graphique des Allocations et Rendement")
+    
+    bounds_text, ret_min, ret_max, vol_min, vol_max = get_bounds("AAPL,MSFT,GOOG,AMZN")
 
-    def run_portfolio_optimization(tickers_input):
-        allocation, graph_path = optimize_portfolio_gradio(tickers_input)
-        return str(allocation), graph_path
+    gr.Markdown(bounds_text)
 
-    button = gr.Button("Optimiser le Portefeuille")
-    button.click(run_portfolio_optimization, inputs=[tickers_input], outputs=[output_allocation, output_graph])
+    method_input = gr.Radio(["Maximiser le gain pour un risque donné", "Minimiser le risque pour un rendement donné"], label="Choisissez une méthode")
+    
+    target_value = gr.Number(label="Entrez votre objectif", value=0.2)
 
-# Lancer l'interface
+
+    output_text = gr.Textbox(label="Résultats", interactive=False)
+    output_graph = gr.Image(label="Graphique")
+
+    button = gr.Button("Optimiser")
+    button.click(optimize_portfolio, inputs=[tickers_input, method_input, target_value], outputs=[output_text, output_graph])
+
 demo.launch()
