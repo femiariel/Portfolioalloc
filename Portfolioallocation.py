@@ -3,9 +3,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import gradio as gr
 from pypfopt import EfficientFrontier, expected_returns, risk_models, discrete_allocation
+import cvxpy as cp
+import numpy as np
 
 # API Key pour Financial Modeling Prep
 FMP_API_KEY = "3gYsTdxP48Q6aci1mDcgchFXGrhd7CQo"
+
+import cvxpy as cp
+import numpy as np
+
 
 # Fonction pour récupérer les prix ajustés d'un actif
 def get_adj_close_price(symbol, start_date="2023-01-01"):
@@ -48,11 +54,17 @@ def get_bounds(tickers_input):
     ef = EfficientFrontier(avg_returns, cov_mat)
     ef.max_sharpe()
     ret_max, vol_max, _ = ef.portfolio_performance(verbose=False)
+  
 
-    return f"📊 Rendements possibles : {ret_min:.2%} → {ret_max:.2%}\n⚖️ Risques possibles : {vol_min:.2%} → {vol_max:.2%}", float(ret_min), float(ret_max), float(vol_min), float(vol_max)
+    return f"📊 Rendements possibles : {ret_min:.2%} → {ret_max:.2%} ⚖️ Risques possibles : {vol_min:.2%} → {vol_max:.2%}"# float(ret_min) float(ret_max), float(vol_min), float(vol_max)
 
 # Fonction principale d'optimisation
 def optimize_portfolio(tickers_input, method, target_value):
+    try:
+        target_value = float(target_value)  # Convertir en float pour éviter l'erreur
+    except ValueError:
+        return "⚠️ L'objectif doit être un nombre valide.", None
+
     tickers = [ticker.strip().upper() for ticker in tickers_input.split(",")]
 
     # Récupérer les prix
@@ -72,8 +84,11 @@ def optimize_portfolio(tickers_input, method, target_value):
     cov_mat = risk_models.sample_cov(prices_df)
 
     ef = EfficientFrontier(avg_returns, cov_mat)
-    optimal_weights = ef.efficient_risk(target_value) if method == "Maximiser le gain pour un risque donné" else ef.efficient_return(target_value)
     
+    # Correction du bug avec conversion en float
+    if method == "Maximiser le gain pour un risque donné":
+        optimal_weights = ef.efficient_risk(target_value)
+
     expected_ret, volatility, sharpe_ratio = ef.portfolio_performance(verbose=True, risk_free_rate=0)
 
     latest_prices = discrete_allocation.get_latest_prices(prices_df)
@@ -116,11 +131,12 @@ def optimize_portfolio(tickers_input, method, target_value):
 with gr.Blocks() as demo:
     tickers_input = gr.Textbox(label="Tickers (séparés par des virgules)", placeholder="Ex: AAPL, MSFT, GOOG")
     
-    bounds_text, ret_min, ret_max, vol_min, vol_max = get_bounds("AAPL,MSFT,GOOG,AMZN")
+    output=gr.Textbox(label="Intervalles pour le rendement et le risque")
+    button1 = gr.Button("Limites pour rendements et risques")
+    button1.click(get_bounds, inputs=[tickers_input], outputs=[output])
 
-    gr.Markdown(bounds_text)
 
-    method_input = gr.Radio(["Maximiser le gain pour un risque donné", "Minimiser le risque pour un rendement donné"], label="Choisissez une méthode")
+    method_input = gr.Radio(["Maximiser le gain pour un risque donné"], label="Choix")
     
     target_value = gr.Number(label="Entrez votre objectif", value=0.2)
 
